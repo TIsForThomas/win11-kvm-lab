@@ -1,0 +1,16 @@
+# Holds the VM password.
+config.sh
+
+# Build artifacts and anything derived from Windows installation media.
+# The ISO embeds the password in plain text; never commit one.
+*.iso
+*.qcow2
+*.img
+*.raw
+*.wim
+*.png
+*.mac
+*.ip
+stage/
+overlay/
+ssh/

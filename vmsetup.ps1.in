@@ -1,0 +1,65 @@
+# Lab VM first-logon setup. Runs once, from the install media.
+# Purpose: make this VM drivable over SSH from the host so your own
+# scripts can be driven from a shell instead of a graphical console.
+# Deliberately does NOT change hibernation, fast startup or activation state: those are
+# real conditions the capture guards must handle, so the VM keeps Windows defaults.
+
+$ErrorActionPreference = 'Continue'
+$log = 'C:\Windows\Setup\Scripts\vmsetup.log'
+New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+function Log($m) { "$(Get-Date -Format s)  $m" | Tee-Object -FilePath $log -Append }
+
+Log "start"
+
+# --- OpenSSH Server -------------------------------------------------------------
+# Feature-on-demand, so it needs to reach Windows Update. Retry: first logon can
+# beat the network coming up.
+for ($i = 1; $i -le 10; $i++) {
+    $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' -ErrorAction SilentlyContinue
+    if ($cap -and $cap.State -eq 'Installed') { Log "OpenSSH.Server already installed"; break }
+    Log "OpenSSH.Server install attempt $i"
+    try {
+        Add-WindowsCapability -Online -Name $cap.Name -ErrorAction Stop | Out-Null
+        Log "OpenSSH.Server installed"
+        break
+    } catch {
+        Log "attempt $i failed: $($_.Exception.Message)"
+        Start-Sleep -Seconds 20
+    }
+}
+
+if (Get-Service sshd -ErrorAction SilentlyContinue) {
+    Set-Service -Name sshd -StartupType Automatic
+    Start-Service sshd
+    Log "sshd started"
+
+    # PowerShell as the default SSH shell, so remote commands behave predictably.
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -PropertyType String -Force `
+        -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' | Out-Null
+
+    # An admin account authorizes via administrators_authorized_keys, NOT
+    # ~/.ssh/authorized_keys. sshd ignores the latter for admins by default.
+    $akf = 'C:\ProgramData\ssh\administrators_authorized_keys'
+    Set-Content -Path $akf -Value '@@SSH_PUBKEY@@' -Encoding ascii
+    # sshd refuses the file unless only Administrators and SYSTEM can write it.
+    icacls $akf /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+    Log "authorized key written"
+
+    New-NetFirewallRule -Name sshd-lab -DisplayName 'OpenSSH Server (lab VM)' `
+        -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 `
+        -ErrorAction SilentlyContinue | Out-Null
+} else {
+    Log "sshd service absent - OpenSSH install did not succeed"
+}
+
+# --- keep the lab VM awake and reachable ---------------------------------------
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+Log "sleep disabled"
+
+# --- record the identity the capture scripts will read --------------------------
+Get-CimInstance Win32_ComputerSystemProduct | Select-Object Name, Vendor, IdentifyingNumber, UUID |
+    Format-List | Out-File -Append $log
+(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').EditionID |
+    ForEach-Object { Log "EditionID: $_" }
+Log "done"
